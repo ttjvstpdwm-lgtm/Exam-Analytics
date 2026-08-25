@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+
+.venv/
+venv/
+env/
+
+.streamlit/secrets.toml
+.env
+
+vendor/
+Exam Analytics/
+data/manual_scores.csv
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+*.zip
+*.docx
