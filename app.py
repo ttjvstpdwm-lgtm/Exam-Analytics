@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import html
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
-import html
 import re
 import sys
 import unicodedata
@@ -98,6 +100,12 @@ def cached_find_exam_sheets(
     if uploaded_bytes:
         return find_exam_sheets(excel_source_from_bytes(uploaded_bytes))
     return find_exam_sheets(Path(path_text))
+
+
+def content_fingerprint(content: bytes | None) -> str:
+    if not content:
+        return ""
+    return hashlib.sha256(content).hexdigest()
 
 
 def source_for_export(path_text: str, uploaded_bytes: bytes | None) -> str | Path | bytes:
@@ -692,17 +700,34 @@ with st.sidebar:
 
 uploaded_bytes = uploaded.getvalue() if uploaded else None
 uploaded_name = uploaded.name if uploaded else None
+uploaded_fingerprint = content_fingerprint(uploaded_bytes)
 local_path = Path(path_text).expanduser()
 path_mtime = None
+path_stamp = ""
+path_updated_at = ""
 if not uploaded_bytes:
     try:
-        path_mtime = local_path.stat().st_mtime
+        path_stat = local_path.stat()
+        path_mtime = path_stat.st_mtime
+        path_stamp = f"{path_stat.st_size}:{path_stat.st_mtime_ns}"
+        path_updated_at = datetime.fromtimestamp(path_stat.st_mtime).strftime("%Y-%m-%d %H:%M")
     except OSError:
         path_mtime = None
 
 if not uploaded_bytes and not local_path.exists():
     st.info("Carica un file Excel dalla sidebar oppure inserisci un percorso locale valido per iniziare.")
     st.stop()
+
+with st.sidebar:
+    if uploaded_bytes:
+        st.caption(f"File caricato: {uploaded_name} | firma {uploaded_fingerprint[:10]}")
+    elif path_stamp:
+        st.caption(f"File locale: {local_path.name} | aggiornato {path_updated_at}")
+    if st.button("Svuota cache e ricarica file"):
+        st.cache_data.clear()
+        st.session_state.pop("exam_sheet_source_signature", None)
+        st.session_state.pop("exam_sheet_selection", None)
+        st.rerun()
 
 try:
     available_exam_sheets = cached_find_exam_sheets(path_text, uploaded_bytes, uploaded_name, path_mtime)
@@ -715,13 +740,19 @@ if not available_exam_sheets:
     st.stop()
 
 source_signature = (
-    f"upload:{uploaded_name}:{len(uploaded_bytes)}"
+    f"upload:{uploaded_name}:{uploaded_fingerprint}"
     if uploaded_bytes
-    else f"path:{local_path}:{path_mtime}"
+    else f"path:{local_path}:{path_stamp or path_mtime}"
 )
-if st.session_state.get("exam_sheet_source_signature") != source_signature:
+source_changed = st.session_state.get("exam_sheet_source_signature") != source_signature
+current_sheet_selection = st.session_state.get("exam_sheet_selection")
+if source_changed or current_sheet_selection is None:
     st.session_state["exam_sheet_selection"] = available_exam_sheets
-    st.session_state["exam_sheet_source_signature"] = source_signature
+elif current_sheet_selection:
+    valid_sheet_selection = [sheet for sheet in current_sheet_selection if sheet in available_exam_sheets]
+    if valid_sheet_selection != current_sheet_selection:
+        st.session_state["exam_sheet_selection"] = valid_sheet_selection or available_exam_sheets
+st.session_state["exam_sheet_source_signature"] = source_signature
 
 with st.sidebar:
     selected_exam_sheets = st.multiselect(

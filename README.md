@@ -22,6 +22,7 @@ http://localhost:8501
 - In alternativa, sul Mac locale puoi indicare un percorso file già presente sul disco.
 - I fogli che contengono colonne `Question ID n` vengono rilevati automaticamente.
 - Puoi scegliere dalla sidebar quali fogli includere, ad esempio `Attending` e/o `Non attending`.
+- Se sostituisci un file con una nuova versione e Streamlit mostra ancora dati vecchi, usa `Svuota cache e ricarica file`.
 - Le analisi possono essere filtrate per `CLASSE`.
 
 ## Cosa fa
