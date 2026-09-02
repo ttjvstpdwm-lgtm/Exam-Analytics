@@ -84,21 +84,33 @@ def _question_numbers(columns: pd.Index) -> list[int]:
 
 def find_exam_sheets(source: str | Path | BytesIO | BinaryIO) -> list[str]:
     xl = pd.ExcelFile(source)
+    return _matching_exam_sheets(xl)
+
+
+def _matching_exam_sheets(xl: pd.ExcelFile, sheet_names: list[str] | tuple[str, ...] | None = None) -> list[str]:
+    candidate_sheets = xl.sheet_names if sheet_names is None else list(dict.fromkeys(sheet_names))
     sheets: list[str] = []
-    for sheet in xl.sheet_names:
+    for sheet in candidate_sheets:
+        if sheet not in xl.sheet_names:
+            continue
         header = pd.read_excel(xl, sheet_name=sheet, nrows=0)
         if _question_numbers(header.columns):
             sheets.append(sheet)
     return sheets
 
 
-def load_exam(source: str | Path | BytesIO | BinaryIO, source_name: str = "Esame") -> ExamData:
+def load_exam(
+    source: str | Path | BytesIO | BinaryIO,
+    source_name: str = "Esame",
+    sheet_names: list[str] | tuple[str, ...] | None = None,
+) -> ExamData:
     xl = pd.ExcelFile(source)
-    exam_sheets: list[str] = []
-    for sheet in xl.sheet_names:
-        header = pd.read_excel(xl, sheet_name=sheet, nrows=0)
-        if _question_numbers(header.columns):
-            exam_sheets.append(sheet)
+    requested_sheets = list(dict.fromkeys(sheet_names)) if sheet_names else None
+    if requested_sheets:
+        missing_sheets = [sheet for sheet in requested_sheets if sheet not in xl.sheet_names]
+        if missing_sheets:
+            raise ValueError("I fogli selezionati non esistono nel file: " + ", ".join(missing_sheets))
+    exam_sheets = _matching_exam_sheets(xl, requested_sheets)
     long_parts: list[pd.DataFrame] = []
     student_parts: list[pd.DataFrame] = []
 
@@ -199,6 +211,8 @@ def load_exam(source: str | Path | BytesIO | BinaryIO, source_name: str = "Esame
             )
             long_parts.append(part)
 
+    if requested_sheets and not long_parts:
+        raise ValueError("Nessuno dei fogli selezionati contiene colonne 'Question ID n'.")
     if not long_parts:
         raise ValueError("Non ho trovato fogli con colonne 'Question ID n'.")
 

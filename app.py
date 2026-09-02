@@ -17,6 +17,7 @@ from exam_tools import (
     build_corrected_workbook,
     excel_source_from_bytes,
     filter_by_class,
+    find_exam_sheets,
     load_corrections,
     load_exam,
     normalize_label,
@@ -80,10 +81,23 @@ def cached_load_exam(
     uploaded_bytes: bytes | None,
     uploaded_name: str | None,
     path_mtime: float | None,
+    selected_sheets: tuple[str, ...],
 ):
     if uploaded_bytes:
-        return load_exam(excel_source_from_bytes(uploaded_bytes), uploaded_name or "File caricato")
-    return load_exam(Path(path_text), Path(path_text).name)
+        return load_exam(excel_source_from_bytes(uploaded_bytes), uploaded_name or "File caricato", selected_sheets)
+    return load_exam(Path(path_text), Path(path_text).name, selected_sheets)
+
+
+@st.cache_data(show_spinner=False)
+def cached_find_exam_sheets(
+    path_text: str,
+    uploaded_bytes: bytes | None,
+    uploaded_name: str | None,
+    path_mtime: float | None,
+) -> list[str]:
+    if uploaded_bytes:
+        return find_exam_sheets(excel_source_from_bytes(uploaded_bytes))
+    return find_exam_sheets(Path(path_text))
 
 
 def source_for_export(path_text: str, uploaded_bytes: bytes | None) -> str | Path | bytes:
@@ -674,7 +688,7 @@ with st.sidebar:
     st.header("Origine dati")
     uploaded = st.file_uploader("Carica un file Excel", type=["xlsx"])
     path_text = st.text_input("Oppure usa questo percorso locale", value=str(DEFAULT_EXCEL_PATH))
-    st.caption("I fogli con colonne Question ID vengono uniti automaticamente.")
+    st.caption("I fogli con colonne Question ID vengono rilevati automaticamente.")
 
 uploaded_bytes = uploaded.getvalue() if uploaded else None
 uploaded_name = uploaded.name if uploaded else None
@@ -691,7 +705,39 @@ if not uploaded_bytes and not local_path.exists():
     st.stop()
 
 try:
-    exam = cached_load_exam(path_text, uploaded_bytes, uploaded_name, path_mtime)
+    available_exam_sheets = cached_find_exam_sheets(path_text, uploaded_bytes, uploaded_name, path_mtime)
+except Exception as exc:
+    st.error(f"Non riesco a leggere i fogli del file: {exc}")
+    st.stop()
+
+if not available_exam_sheets:
+    st.error("Non ho trovato fogli con colonne 'Question ID n'.")
+    st.stop()
+
+source_signature = (
+    f"upload:{uploaded_name}:{len(uploaded_bytes)}"
+    if uploaded_bytes
+    else f"path:{local_path}:{path_mtime}"
+)
+if st.session_state.get("exam_sheet_source_signature") != source_signature:
+    st.session_state["exam_sheet_selection"] = available_exam_sheets
+    st.session_state["exam_sheet_source_signature"] = source_signature
+
+with st.sidebar:
+    selected_exam_sheets = st.multiselect(
+        "Fogli esame da includere",
+        options=available_exam_sheets,
+        key="exam_sheet_selection",
+        help="Puoi includere tutti i fogli o selezionare solo attending/non attending.",
+    )
+    st.caption(f"Fogli esame rilevati: {', '.join(available_exam_sheets)}")
+
+if not selected_exam_sheets:
+    st.warning("Seleziona almeno un foglio esame dalla sidebar.")
+    st.stop()
+
+try:
+    exam = cached_load_exam(path_text, uploaded_bytes, uploaded_name, path_mtime, tuple(selected_exam_sheets))
 except Exception as exc:
     st.error(f"Non riesco a leggere il file: {exc}")
     st.stop()
