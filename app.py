@@ -15,6 +15,7 @@ import pandas as pd
 import streamlit as st
 
 from exam_tools import (
+    EXTRA_COLUMN_PREFIX,
     apply_corrections,
     build_corrected_workbook,
     excel_source_from_bytes,
@@ -115,9 +116,28 @@ def source_for_export(path_text: str, uploaded_bytes: bytes | None) -> str | Pat
 
 
 def fmt_num(value: float | int | None, digits: int = 2) -> str:
-    if value is None or pd.isna(value):
+    number = parse_number(value)
+    if number is None or pd.isna(number):
         return "-"
-    return f"{float(value):.{digits}f}"
+    return f"{float(number):.{digits}f}"
+
+
+def parse_number(value: object) -> float | None:
+    if value is None or pd.isna(value):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        text = text.replace("%", "").replace(",", ".")
+        try:
+            return float(text)
+        except ValueError:
+            return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def plain_text(value: object) -> str:
@@ -315,6 +335,176 @@ def score_column(totals_df: pd.DataFrame, preferred: str, fallback: str) -> str:
     return fallback
 
 
+NO_SCORE_COLUMN = "Non usare"
+
+CANONICAL_SCORE_LABELS = {
+    "blackboard_total_closed": "Totale chiuse Blackboard",
+    "totale_aperte": "Totale aperte",
+    "totale_esame": "Totale esame",
+    "finale_non_arrotondato": "Finale non arrotondato",
+    "finale_rounded": "Finale rounded",
+    "progetto": "Progetto / assignment",
+    "totale_autoscore": "Totale autoscore",
+    "totale_integrato": "Totale integrato app",
+}
+
+EXCLUDED_SCORE_COLUMNS = {
+    "student_uid",
+    "sheet_name",
+    "source_row",
+    "username",
+    "last_name",
+    "first_name",
+    "full_name",
+    "classe",
+    "student_label",
+    "punti_possibili",
+    "domande_da_correggere",
+    "domande_parziali",
+    "domande_errate",
+    "pct_integrato",
+    "visione_compiti",
+}
+
+EXCLUDED_SCORE_LABEL_WORDS = {
+    "username",
+    "matricola",
+    "userid",
+    "id",
+    "nome",
+    "cognome",
+    "email",
+    "mail",
+    "classe",
+    "class",
+    "foglio",
+    "sheet",
+    "question",
+    "domanda",
+    "answer",
+    "risposta",
+    "commento",
+    "timestamp",
+    "source",
+}
+
+EXCLUDED_SCORE_LABEL_PHRASES = {
+    "student id",
+    "user id",
+    "last name",
+    "first name",
+    "full name",
+}
+
+
+def score_column_label(column: object) -> str:
+    column_text = plain_text(column)
+    if not column_text or column_text == NO_SCORE_COLUMN:
+        return NO_SCORE_COLUMN
+    if column_text.startswith(EXTRA_COLUMN_PREFIX):
+        return column_text[len(EXTRA_COLUMN_PREFIX) :]
+    return CANONICAL_SCORE_LABELS.get(column_text, column_text.replace("_", " ").title())
+
+
+def score_values(df: pd.DataFrame, column: str | None) -> pd.Series:
+    if not column or column == NO_SCORE_COLUMN or column not in df.columns:
+        return pd.Series([pd.NA] * len(df), index=df.index, dtype="Float64")
+    return df[column].map(parse_number).astype("Float64")
+
+
+def looks_like_score_column(column: str, df: pd.DataFrame) -> bool:
+    if column in EXCLUDED_SCORE_COLUMNS:
+        return False
+    label = score_column_label(column).strip().lower()
+    if not label:
+        return False
+    label_words = set(re.findall(r"[a-z0-9]+", label))
+    if label in EXCLUDED_SCORE_LABEL_PHRASES or label_words.intersection(EXCLUDED_SCORE_LABEL_WORDS):
+        return False
+    if any(phrase in label for phrase in EXCLUDED_SCORE_LABEL_PHRASES):
+        return False
+    values = score_values(df, column)
+    return values.notna().any()
+
+
+def score_column_options(totals_df: pd.DataFrame) -> list[str]:
+    preferred = [
+        "finale_rounded",
+        "totale_esame",
+        "progetto",
+        "finale_non_arrotondato",
+        "totale_integrato",
+        "totale_autoscore",
+        "blackboard_total_closed",
+        "totale_aperte",
+    ]
+    options: list[str] = []
+    for column in preferred:
+        if column in totals_df.columns and looks_like_score_column(column, totals_df):
+            options.append(column)
+    for column in totals_df.columns:
+        if column in options:
+            continue
+        if str(column).startswith(EXTRA_COLUMN_PREFIX) and looks_like_score_column(str(column), totals_df):
+            options.append(str(column))
+    return options
+
+
+def find_default_score_column(
+    options: list[str],
+    keywords: list[str],
+    fallback: str | None = None,
+    use_first: bool = True,
+) -> str:
+    normalized_options = {option: normalize_person_name(score_column_label(option)) for option in options}
+    for keyword in keywords:
+        normalized_keyword = normalize_person_name(keyword)
+        for option, normalized_option in normalized_options.items():
+            if normalized_keyword and normalized_keyword in normalized_option:
+                return option
+    if fallback and fallback in options:
+        return fallback
+    if options and use_first:
+        return options[0]
+    return fallback or NO_SCORE_COLUMN
+
+
+def set_default_selectbox_value(key: str, options: list[str], default: str) -> None:
+    if not options:
+        return
+    if st.session_state.get(key) not in options:
+        st.session_state[key] = default if default in options else options[0]
+
+
+def configured_score_items(
+    project_column: str,
+    written_column: str,
+    final_column: str,
+) -> list[tuple[str, str]]:
+    items = [
+        ("Progetto / assignment", project_column),
+        ("Esame scritto", written_column),
+        ("Finale", final_column),
+    ]
+    return [(label, column) for label, column in items if column and column != NO_SCORE_COLUMN]
+
+
+def configured_scores_summary(totals_df: pd.DataFrame, score_items: list[tuple[str, str]]) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for label, column in score_items:
+        values = score_values(totals_df, column)
+        rows.append(
+            {
+                "Voto": label,
+                "Colonna": score_column_label(column),
+                "Studenti con voto": int(values.notna().sum()),
+                "Media": values.mean(),
+                "Mediana": values.median(),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def distribution_chart(dist_counts: pd.DataFrame, x_title: str):
     dist_labels = dist_counts[dist_counts["studenti"] > 0].copy()
     bars = (
@@ -412,22 +602,22 @@ def build_review_docx(
     student_questions: pd.DataFrame,
     include_question_text: bool,
     include_correct_answer: bool,
+    review_score_columns: list[tuple[str, str]] | None = None,
 ) -> bytes:
     review_questions = student_questions[student_questions["status"].isin(["Errata", "Parziale"])].sort_values("question_num")
+    if not review_score_columns:
+        review_score_columns = [
+            ("Progetto / assignment", "progetto"),
+            ("Esame scritto", "totale_esame"),
+            ("Finale", "finale_rounded"),
+        ]
+    score_headers = [label for label, _ in review_score_columns] or ["Voto"]
+    score_row = [fmt_num(selected_total.get(column)) for _, column in review_score_columns] or ["-"]
     title = f"Scheda visione compiti - {plain_text(selected_total.get('full_name'))}"
     body: list[str] = [
         paragraph_xml(title, "Title"),
         paragraph_xml("Riepilogo studente", "Heading1"),
-        document_table_xml(
-            [
-                ["Progetto", "Esame", "Finale rounded"],
-                [
-                    fmt_num(selected_total.get("progetto")),
-                    fmt_num(selected_total.get("totale_esame", selected_total.get("totale_integrato"))),
-                    fmt_num(selected_total.get("finale_rounded")),
-                ],
-            ]
-        ),
+        document_table_xml([score_headers, score_row]),
         paragraph_xml("Domande errate o parzialmente corrette", "Heading1"),
     ]
 
@@ -527,6 +717,7 @@ def build_review_zip(
     all_scored: pd.DataFrame,
     include_question_text: bool,
     include_correct_answer: bool,
+    review_score_columns: list[tuple[str, str]] | None = None,
 ) -> bytes:
     buffer = BytesIO()
     used_names: set[str] = set()
@@ -546,6 +737,7 @@ def build_review_zip(
                     student_questions,
                     include_question_text=include_question_text,
                     include_correct_answer=include_correct_answer,
+                    review_score_columns=review_score_columns,
                 ),
             )
     return buffer.getvalue()
@@ -583,6 +775,7 @@ def build_combined_review_docx(
     all_scored: pd.DataFrame,
     include_question_text: bool,
     include_correct_answer: bool,
+    review_score_columns: list[tuple[str, str]] | None = None,
 ) -> bytes:
     fragments: list[str] = []
     template_docx: bytes | None = None
@@ -594,6 +787,7 @@ def build_combined_review_docx(
             student_questions,
             include_question_text=include_question_text,
             include_correct_answer=include_correct_answer,
+            review_score_columns=review_score_columns,
         )
         if template_docx is None:
             template_docx = student_docx
@@ -601,14 +795,20 @@ def build_combined_review_docx(
             fragments.append(page_break_xml())
         fragments.append(extract_docx_body_content(student_docx))
     if template_docx is None:
-        return build_review_docx(pd.Series(dtype=object), pd.DataFrame(), include_question_text, include_correct_answer)
+        return build_review_docx(
+            pd.Series(dtype=object),
+            pd.DataFrame(),
+            include_question_text,
+            include_correct_answer,
+            review_score_columns=review_score_columns,
+        )
     return replace_docx_body(template_docx, "".join(fragments))
 
 
 def excel_value(value: object) -> int | float | None:
-    if value is None or pd.isna(value):
+    number = parse_number(value)
+    if number is None or pd.isna(number):
         return None
-    number = float(value)
     if number.is_integer():
         return int(number)
     return round(number, 2)
@@ -623,7 +823,13 @@ def find_header_column(sheet, header_row: int, names: list[str], fallback: int) 
     return fallback
 
 
-def compile_official_results_xls(template_source: str | Path | bytes, totals_df: pd.DataFrame) -> tuple[bytes, dict[str, object]]:
+def compile_official_results_xls(
+    template_source: str | Path | bytes,
+    totals_df: pd.DataFrame,
+    voto_score_column: str = "finale_rounded",
+    esame_score_column: str = "totale_esame",
+    progetto_score_column: str | None = "progetto",
+) -> tuple[bytes, dict[str, object]]:
     import xlrd
     from xlutils.copy import copy as copy_workbook
 
@@ -663,11 +869,13 @@ def compile_official_results_xls(template_source: str | Path | bytes, totals_df:
         if student_id not in score_map:
             continue
         row = score_map[student_id]
-        values = [
-            (voto_col, excel_value(row.get("finale_rounded"))),
-            (esame_col, excel_value(row.get("totale_esame"))),
-            (progetto_col, excel_value(row.get("progetto"))),
+        value_specs = [
+            (voto_col, voto_score_column),
+            (esame_col, esame_score_column),
         ]
+        if progetto_score_column and progetto_score_column != NO_SCORE_COLUMN:
+            value_specs.append((progetto_col, progetto_score_column))
+        values = [(col_idx, excel_value(row.get(score_col))) for col_idx, score_col in value_specs]
         for col_idx, value in values:
             if value is not None:
                 write_sheet.write(row_idx, col_idx, value)
@@ -686,6 +894,9 @@ def compile_official_results_xls(template_source: str | Path | bytes, totals_df:
         "voto_column": voto_col + 1,
         "esame_column": esame_col + 1,
         "progetto_column": progetto_col + 1,
+        "voto_score_column": voto_score_column,
+        "esame_score_column": esame_score_column,
+        "progetto_score_column": progetto_score_column,
     }
     return output.getvalue(), stats
 
@@ -777,6 +988,76 @@ corrections = load_corrections(CORRECTIONS_PATH)
 scored = apply_corrections(exam.long_df, corrections)
 totals = student_totals(scored)
 
+score_options = score_column_options(totals)
+if not score_options:
+    st.error("Non ho trovato colonne numeriche utilizzabili come voto.")
+    st.stop()
+
+dashboard_default = find_default_score_column(
+    score_options,
+    ["Finale rounded", "Finale", "Final grade", "Totale esame", "Totale integrato"],
+)
+written_default = find_default_score_column(
+    score_options,
+    ["Totale esame", "Esame scritto", "Written exam", "Exam score", "Totale integrato"],
+    fallback=dashboard_default,
+)
+final_default = find_default_score_column(
+    score_options,
+    ["Finale rounded", "Finale", "Final grade"],
+    fallback=dashboard_default,
+)
+project_default = find_default_score_column(
+    score_options,
+    ["Progetto", "Project", "Assignment"],
+    fallback=NO_SCORE_COLUMN,
+    use_first=False,
+)
+optional_score_options = [NO_SCORE_COLUMN] + score_options
+score_config_signature = f"{source_signature}|sheets:{'|'.join(selected_exam_sheets)}"
+
+if st.session_state.get("score_config_source_signature") != score_config_signature:
+    st.session_state["dashboard_score_column"] = dashboard_default
+    st.session_state["written_score_column"] = written_default
+    st.session_state["final_score_column"] = final_default
+    st.session_state["project_score_column"] = project_default
+    st.session_state["score_config_source_signature"] = score_config_signature
+else:
+    set_default_selectbox_value("dashboard_score_column", score_options, dashboard_default)
+    set_default_selectbox_value("written_score_column", score_options, written_default)
+    set_default_selectbox_value("final_score_column", score_options, final_default)
+    set_default_selectbox_value("project_score_column", optional_score_options, project_default)
+
+with st.sidebar:
+    st.header("Configurazione voti")
+    dashboard_score_column = st.selectbox(
+        "Voto da analizzare nella dashboard",
+        score_options,
+        key="dashboard_score_column",
+        format_func=score_column_label,
+    )
+    written_score_column = st.selectbox(
+        "Voto esame scritto",
+        score_options,
+        key="written_score_column",
+        format_func=score_column_label,
+    )
+    final_score_column = st.selectbox(
+        "Voto finale",
+        score_options,
+        key="final_score_column",
+        format_func=score_column_label,
+    )
+    project_score_column = st.selectbox(
+        "Voto progetto / assignment",
+        optional_score_options,
+        key="project_score_column",
+        format_func=score_column_label,
+    )
+    st.caption("Queste scelte alimentano dashboard, schede visione compiti ed export.")
+
+review_score_columns = configured_score_items(project_score_column, written_score_column, final_score_column)
+
 classes = ["Tutte"] + sorted([c for c in scored["classe"].dropna().astype(str).unique() if c])
 with st.sidebar:
     st.header("Filtri")
@@ -795,22 +1076,23 @@ with tab_dashboard:
     if filtered_totals.empty:
         st.info("Nessuno studente nel filtro selezionato.")
     else:
-        exam_score_col = score_column(filtered_totals, "totale_esame", "totale_integrato")
-        final_score_available = "finale_rounded" in filtered_totals.columns and filtered_totals["finale_rounded"].notna().any()
+        dashboard_label = score_column_label(dashboard_score_column)
+        dashboard_totals = filtered_totals.copy()
+        dashboard_totals["__dashboard_score"] = score_values(dashboard_totals, dashboard_score_column)
 
-        st.markdown("### Voti esame")
+        st.markdown(f"### Voto analizzato: {dashboard_label}")
         metric_cols = st.columns(5)
         metric_cols[0].metric("Studenti", f"{filtered_totals['student_uid'].nunique():,}".replace(",", "."))
-        metric_cols[1].metric("Media totale esame", fmt_num(filtered_totals[exam_score_col].mean()))
-        metric_cols[2].metric("Mediana totale esame", fmt_num(filtered_totals[exam_score_col].median()))
-        metric_cols[3].metric("Con voto esame", int(filtered_totals[exam_score_col].notna().sum()))
+        metric_cols[1].metric(f"Media {dashboard_label}", fmt_num(dashboard_totals["__dashboard_score"].mean()))
+        metric_cols[2].metric(f"Mediana {dashboard_label}", fmt_num(dashboard_totals["__dashboard_score"].median()))
+        metric_cols[3].metric("Con voto", int(dashboard_totals["__dashboard_score"].notna().sum()))
         metric_cols[4].metric("Da correggere", int(filtered["is_missing_score"].sum()))
 
-        exam_dist_counts = grade_distribution(filtered_totals, exam_score_col)
+        exam_dist_counts = grade_distribution(dashboard_totals, "__dashboard_score")
 
         left, right = st.columns([1.05, 1])
         with left:
-            st.altair_chart(distribution_chart(exam_dist_counts, "Fascia voto esame"), width="stretch")
+            st.altair_chart(distribution_chart(exam_dist_counts, f"Fascia {dashboard_label}"), width="stretch")
         with right:
             q_chart_data = summary.copy()
             q_chart_data["score_pct_medio"] = q_chart_data["score_pct_medio"].fillna(0)
@@ -830,16 +1112,18 @@ with tab_dashboard:
             )
             st.altair_chart(q_chart, width="stretch")
 
-        st.markdown("### Voto finale rounded")
-        if final_score_available:
-            final_metric_cols = st.columns(3)
-            final_metric_cols[0].metric("Studenti con voto finale", int(filtered_totals["finale_rounded"].notna().sum()))
-            final_metric_cols[1].metric("Media finale rounded", fmt_num(filtered_totals["finale_rounded"].mean()))
-            final_metric_cols[2].metric("Mediana finale rounded", fmt_num(filtered_totals["finale_rounded"].median()))
-            final_dist_counts = grade_distribution(filtered_totals, "finale_rounded")
-            st.altair_chart(distribution_chart(final_dist_counts, "Fascia voto finale rounded"), width="stretch")
-        else:
-            st.info("Nel filtro selezionato non ci sono valori in FINALE ROUNDED.")
+        configured_summary = configured_scores_summary(filtered_totals, review_score_columns)
+        if not configured_summary.empty:
+            st.markdown("### Voti configurati")
+            st.dataframe(
+                configured_summary,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Media": st.column_config.NumberColumn("Media", format="%.2f"),
+                    "Mediana": st.column_config.NumberColumn("Mediana", format="%.2f"),
+                },
+            )
 
         st.markdown("### Schede visione compiti")
         bulk_cols = st.columns([1, 1, 2])
@@ -910,6 +1194,7 @@ with tab_dashboard:
                     scored,
                     include_question_text=bulk_include_question_text,
                     include_correct_answer=bulk_include_correct_answer,
+                    review_score_columns=review_score_columns,
                 )
                 st.download_button(
                     "Scarica unico Word schede visione compiti",
@@ -924,6 +1209,7 @@ with tab_dashboard:
                     scored,
                     include_question_text=bulk_include_question_text,
                     include_correct_answer=bulk_include_correct_answer,
+                    review_score_columns=review_score_columns,
                 )
                 st.download_button(
                     "Scarica ZIP schede visione compiti",
@@ -968,11 +1254,13 @@ with tab_dashboard:
 
         if selected_class == "Tutte":
             st.subheader("Confronto classi")
-            class_totals = totals.groupby("classe", dropna=False).agg(
+            class_source = totals.copy()
+            class_source["__dashboard_score"] = score_values(class_source, dashboard_score_column)
+            class_totals = class_source.groupby("classe", dropna=False).agg(
                 studenti=("student_uid", "nunique"),
-                media_totale_esame=("totale_esame", "mean"),
-                media_finale_rounded=("finale_rounded", "mean"),
-                mediana_totale_esame=("totale_esame", "median"),
+                con_voto=("__dashboard_score", lambda s: int(s.notna().sum())),
+                media_voto=("__dashboard_score", "mean"),
+                mediana_voto=("__dashboard_score", "median"),
                 da_correggere=("domande_da_correggere", "sum"),
             ).reset_index()
             st.dataframe(
@@ -980,9 +1268,9 @@ with tab_dashboard:
                     columns={
                         "classe": "Classe",
                         "studenti": "Studenti",
-                        "media_totale_esame": "Media totale esame",
-                        "media_finale_rounded": "Media finale rounded",
-                        "mediana_totale_esame": "Mediana totale esame",
+                        "con_voto": "Con voto",
+                        "media_voto": f"Media {dashboard_label}",
+                        "mediana_voto": f"Mediana {dashboard_label}",
                         "da_correggere": "Da correggere",
                     }
                 ),
@@ -1005,13 +1293,19 @@ with tab_students:
         student_questions = scored[scored["student_uid"] == selected_uid].sort_values("question_num").copy()
         selected_total = student_totals(student_questions).iloc[0]
 
-        cols = st.columns(6)
-        cols[0].metric("Classe", selected_total["classe"])
-        cols[1].metric("Progetto", fmt_num(selected_total.get("progetto")))
-        cols[2].metric("Totale esame", fmt_num(selected_total.get("totale_esame", selected_total["totale_integrato"])))
-        cols[3].metric("Finale rounded", fmt_num(selected_total.get("finale_rounded")))
-        cols[4].metric("Punti possibili", fmt_num(selected_total["punti_possibili"]))
-        cols[5].metric("Da correggere", int(selected_total["domande_da_correggere"]))
+        student_metric_items: list[tuple[str, object]] = [("Classe", selected_total["classe"])]
+        student_metric_items.extend(
+            (label, fmt_num(selected_total.get(column))) for label, column in review_score_columns
+        )
+        student_metric_items.extend(
+            [
+                ("Punti possibili", fmt_num(selected_total["punti_possibili"])),
+                ("Da correggere", int(selected_total["domande_da_correggere"])),
+            ]
+        )
+        cols = st.columns(len(student_metric_items))
+        for metric_col, (label, value) in zip(cols, student_metric_items):
+            metric_col.metric(label, value)
 
         st.markdown("#### Scheda visione compiti")
         option_cols = st.columns([1, 1, 2])
@@ -1022,6 +1316,7 @@ with tab_students:
             student_questions,
             include_question_text=include_question_text,
             include_correct_answer=include_correct_answer,
+            review_score_columns=review_score_columns,
         )
         option_cols[2].download_button(
             "Scarica scheda visione compiti",
@@ -1110,47 +1405,51 @@ with tab_students:
 
 with tab_export:
     st.subheader("Export")
-    export_totals = totals[
-        [
-            "classe",
-            "sheet_name",
-            "username",
-            "last_name",
-            "first_name",
-            "full_name",
-            "progetto",
-            "totale_aperte",
-            "totale_esame",
-            "finale_non_arrotondato",
-            "finale_rounded",
-            "totale_autoscore",
-            "totale_integrato",
-            "punti_possibili",
-            "domande_da_correggere",
-            "domande_parziali",
-            "domande_errate",
-        ]
-    ].rename(
-        columns={
-            "classe": "Classe",
-            "sheet_name": "Foglio",
-            "username": "Matricola",
-            "last_name": "Cognome",
-            "first_name": "Nome",
-            "full_name": "Nome completo",
-            "progetto": "Progetto",
-            "totale_aperte": "Totale aperte",
-            "totale_esame": "Totale esame",
-            "finale_non_arrotondato": "Finale non arrotondato",
-            "finale_rounded": "Finale rounded",
-            "totale_autoscore": "Totale autoscore",
-            "totale_integrato": "Totale integrato",
-            "punti_possibili": "Punti possibili",
-            "domande_da_correggere": "Domande da correggere",
-            "domande_parziali": "Domande parziali",
-            "domande_errate": "Domande errate",
-        }
-    )
+    base_export_columns = [
+        "classe",
+        "sheet_name",
+        "username",
+        "last_name",
+        "first_name",
+        "full_name",
+        "progetto",
+        "totale_aperte",
+        "totale_esame",
+        "finale_non_arrotondato",
+        "finale_rounded",
+        "totale_autoscore",
+        "totale_integrato",
+        "punti_possibili",
+        "domande_da_correggere",
+        "domande_parziali",
+        "domande_errate",
+    ]
+    configured_export_columns: list[str] = []
+    for column in [dashboard_score_column] + [column for _, column in review_score_columns]:
+        if column in totals.columns and column not in base_export_columns and column not in configured_export_columns:
+            configured_export_columns.append(column)
+    export_columns = [column for column in base_export_columns + configured_export_columns if column in totals.columns]
+    export_names = {
+        "classe": "Classe",
+        "sheet_name": "Foglio",
+        "username": "Matricola",
+        "last_name": "Cognome",
+        "first_name": "Nome",
+        "full_name": "Nome completo",
+        "progetto": "Progetto",
+        "totale_aperte": "Totale aperte",
+        "totale_esame": "Totale esame",
+        "finale_non_arrotondato": "Finale non arrotondato",
+        "finale_rounded": "Finale rounded",
+        "totale_autoscore": "Totale autoscore",
+        "totale_integrato": "Totale integrato",
+        "punti_possibili": "Punti possibili",
+        "domande_da_correggere": "Domande da correggere",
+        "domande_parziali": "Domande parziali",
+        "domande_errate": "Domande errate",
+    }
+    export_names.update({column: score_column_label(column) for column in configured_export_columns})
+    export_totals = totals[export_columns].rename(columns=export_names)
     st.dataframe(export_totals, width="stretch", hide_index=True)
     st.download_button(
         "Scarica riepilogo voti CSV",
@@ -1194,13 +1493,46 @@ with tab_export:
     else:
         official_name = "Esiti_compilato.xls"
 
+    st.markdown("##### Mappatura voti nel template ufficiale")
+    set_default_selectbox_value("official_voto_score_column", score_options, final_score_column)
+    set_default_selectbox_value("official_esame_score_column", score_options, written_score_column)
+    set_default_selectbox_value("official_progetto_score_column", optional_score_options, project_score_column)
+    official_mapping_cols = st.columns(3)
+    official_voto_score_column = official_mapping_cols[0].selectbox(
+        "Colonna app per Voto",
+        score_options,
+        key="official_voto_score_column",
+        format_func=score_column_label,
+    )
+    official_esame_score_column = official_mapping_cols[1].selectbox(
+        "Colonna app per Esame scritto",
+        score_options,
+        key="official_esame_score_column",
+        format_func=score_column_label,
+    )
+    official_progetto_score_column = official_mapping_cols[2].selectbox(
+        "Colonna app per Progetto",
+        optional_score_options,
+        key="official_progetto_score_column",
+        format_func=score_column_label,
+    )
+
     if official_source is not None:
         try:
-            compiled_official, official_stats = compile_official_results_xls(official_source, totals)
+            compiled_official, official_stats = compile_official_results_xls(
+                official_source,
+                totals,
+                voto_score_column=official_voto_score_column,
+                esame_score_column=official_esame_score_column,
+                progetto_score_column=official_progetto_score_column,
+            )
             missing = official_stats["missing_in_template"]
             st.caption(
                 f"Studenti compilati: {official_stats['matched']} su {official_stats['students_in_exam']} | "
-                f"Colonne usate: Voto Q, Esame scritto W, Progetto X"
+                "Template: Voto Q, Esame scritto W, Progetto X | "
+                f"App: Voto = {score_column_label(official_voto_score_column)}, "
+                f"Esame scritto = {score_column_label(official_esame_score_column)}, "
+                f"Progetto = {score_column_label(official_progetto_score_column)}"
             )
             if missing:
                 st.warning(

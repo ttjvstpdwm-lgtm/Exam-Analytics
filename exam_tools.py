@@ -13,6 +13,7 @@ from openpyxl import load_workbook
 
 
 QUESTION_ID_RE = re.compile(r"^Question ID\s+(\d+)$", re.IGNORECASE)
+EXTRA_COLUMN_PREFIX = "excel_col__"
 
 STUDENT_COLUMNS = [
     "Username",
@@ -21,6 +22,28 @@ STUDENT_COLUMNS = [
     "Full Name",
     "CLASSE",
 ]
+
+FIXED_STUDENT_COLUMNS = {
+    "username",
+    "last name",
+    "first name",
+    "full name",
+    "classe",
+    "totale chiuse",
+    "totale aperte",
+    "progetto",
+    "totale esame",
+    "finale non arrotondato",
+    "finale rounded",
+    "visione compiti",
+    "visione",
+    "iscritto visione",
+    "iscritta visione",
+    "iscrizione visione",
+    "prenotato visione",
+    "prenotata visione",
+    "prenotazione visione",
+}
 
 
 @dataclass(frozen=True)
@@ -82,6 +105,44 @@ def _question_numbers(columns: pd.Index) -> list[int]:
     return sorted(set(nums))
 
 
+def _is_question_detail_column(column: object) -> bool:
+    text = str(column).strip()
+    if QUESTION_ID_RE.match(text):
+        return True
+    return bool(
+        re.match(
+            r"^(Question|Answer|Possible Points|Auto Score|Manual Score|Correct Answer|Risposta corretta|Soluzione)\s+\d+$",
+            text,
+            re.IGNORECASE,
+        )
+        or re.match(r"^Commento\s*Q?\s*\d+$", text, re.IGNORECASE)
+    )
+
+
+def _extra_column_key(column: object, used_keys: set[str]) -> str:
+    base = EXTRA_COLUMN_PREFIX + str(column).strip()
+    key = base
+    counter = 2
+    while key in used_keys:
+        key = f"{base} ({counter})"
+        counter += 1
+    used_keys.add(key)
+    return key
+
+
+def _extra_student_columns(df: pd.DataFrame) -> pd.DataFrame:
+    extras: dict[str, pd.Series] = {}
+    used_keys: set[str] = set()
+    for column in df.columns:
+        normalized = str(column).strip().lower()
+        if normalized in FIXED_STUDENT_COLUMNS or _is_question_detail_column(column):
+            continue
+        extras[_extra_column_key(column, used_keys)] = df[column]
+    if not extras:
+        return pd.DataFrame(index=df.index)
+    return pd.DataFrame(extras, index=df.index)
+
+
 def find_exam_sheets(source: str | Path | BytesIO | BinaryIO) -> list[str]:
     xl = pd.ExcelFile(source)
     return _matching_exam_sheets(xl)
@@ -124,6 +185,7 @@ def load_exam(
         source_row = pd.Series(df.index, index=df.index, name="source_row")
         username = _series_or_blank(df, "Username").map(normalize_label)
         student_uid = sheet + "|" + source_row.astype(str) + "|" + username.astype(str)
+        extra_student_columns = _extra_student_columns(df)
 
         student_part = pd.DataFrame(
             {
@@ -154,6 +216,8 @@ def load_exam(
                 ).map(normalize_label),
             }
         )
+        if not extra_student_columns.empty:
+            student_part = pd.concat([student_part, extra_student_columns], axis=1)
         student_parts.append(student_part)
 
         for question_num in question_numbers:
@@ -191,6 +255,7 @@ def load_exam(
                     "possible_points": possible,
                     "auto_score": auto_score,
                     "manual_score_file": manual_score,
+                    "blackboard_total_closed": coerce_number(_series_or_blank(df, "TOTALE CHIUSE")),
                     "totale_aperte": coerce_number(_series_or_blank(df, "TOTALE APERTE")),
                     "progetto": coerce_number(_series_or_blank(df, "PROGETTO")),
                     "totale_esame": coerce_number(_series_or_blank(df, "TOTALE ESAME")),
@@ -209,6 +274,8 @@ def load_exam(
                     ).map(normalize_label),
                 }
             )
+            if not extra_student_columns.empty:
+                part = pd.concat([part, extra_student_columns], axis=1)
             long_parts.append(part)
 
     if requested_sheets and not long_parts:
@@ -265,8 +332,10 @@ def apply_corrections(long_df: pd.DataFrame, corrections: pd.DataFrame) -> pd.Da
 
 def add_score_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
+    out["auto_score"] = coerce_number(out["auto_score"])
+    out["manual_score"] = coerce_number(out["manual_score"])
     out["auto_score_filled"] = out["auto_score"].fillna(0)
-    out["integrated_score_raw"] = out["manual_score"].combine_first(out["auto_score"])
+    out["integrated_score_raw"] = out["manual_score"].where(out["manual_score"].notna(), out["auto_score"])
     out["integrated_score"] = out["integrated_score_raw"].fillna(0)
     out["is_missing_score"] = out["integrated_score_raw"].isna()
     out["score_pct"] = np.where(
@@ -294,6 +363,7 @@ def student_totals(scored_df: pd.DataFrame) -> pd.DataFrame:
     totals = grouped.agg(
         totale_autoscore=("auto_score_filled", "sum"),
         totale_integrato=("integrated_score", "sum"),
+        blackboard_total_closed=("blackboard_total_closed", "first"),
         totale_aperte=("totale_aperte", "first"),
         progetto=("progetto", "first"),
         totale_esame=("totale_esame", "first"),
@@ -305,6 +375,14 @@ def student_totals(scored_df: pd.DataFrame) -> pd.DataFrame:
         domande_parziali=("status", lambda s: int((s == "Parziale").sum())),
         domande_errate=("status", lambda s: int((s == "Errata").sum())),
     ).reset_index()
+    extra_cols = [column for column in scored_df.columns if str(column).startswith(EXTRA_COLUMN_PREFIX)]
+    if extra_cols:
+        extra_totals = grouped[extra_cols].first().reset_index()
+        totals = totals.merge(
+            extra_totals,
+            on=["student_uid", "sheet_name", "source_row", "username", "last_name", "first_name", "full_name", "classe"],
+            how="left",
+        )
     totals["pct_integrato"] = np.where(
         totals["punti_possibili"].fillna(0) > 0,
         totals["totale_integrato"] / totals["punti_possibili"],

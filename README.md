@@ -22,6 +22,7 @@ http://localhost:8501
 - In alternativa, sul Mac locale puoi indicare un percorso file già presente sul disco.
 - I fogli che contengono colonne `Question ID n` vengono rilevati automaticamente.
 - Puoi scegliere dalla sidebar quali fogli includere, ad esempio `Attending` e/o `Non attending`.
+- Puoi scegliere dalla sidebar quali colonne usare come voto dashboard, voto esame scritto, voto finale e voto progetto/assignment.
 - Se sostituisci un file con una nuova versione e Streamlit mostra ancora dati vecchi, usa `Svuota cache e ricarica file`.
 - Le analisi possono essere filtrate per `CLASSE`.
 
@@ -29,12 +30,13 @@ http://localhost:8501
 
 - riepilogo con medie, mediane, distribuzione dei voti e analisi per domanda;
 - selezione dei fogli esame da analizzare nello stesso file Excel;
+- selezione dinamica delle colonne voto, utile quando file o esami hanno intestazioni diverse;
 - dettaglio del singolo studente;
 - evidenziazione di domande errate, parziali o senza voto;
 - gestione dei `Manual Score`;
 - generazione schede visione compiti in Word;
 - esportazione Excel corretta;
-- compilazione del file ufficiale esiti `.xls`.
+- compilazione del file ufficiale esiti `.xls` con mappatura configurabile delle colonne voto.
 
 ## Privacy e file dati
 
