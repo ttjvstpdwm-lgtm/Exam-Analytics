@@ -505,6 +505,91 @@ def configured_scores_summary(totals_df: pd.DataFrame, score_items: list[tuple[s
     return pd.DataFrame(rows)
 
 
+REVIEW_LANGUAGE_OPTIONS = {
+    "Italiano": "it",
+    "English": "en",
+}
+
+REVIEW_TEXTS = {
+    "it": {
+        "title": "Scheda visione compiti",
+        "student_summary": "Riepilogo studente",
+        "review_questions": "Domande errate o parzialmente corrette",
+        "no_review_questions": "Non risultano domande errate o parzialmente corrette.",
+        "question": "Domanda",
+        "student_answer": "Risposta dello studente",
+        "question_text": "Testo domanda",
+        "correct_answer": "Risposta corretta",
+        "correct_answer_unavailable": "Non disponibile nel file",
+        "correction_comment": "Commento correzione",
+    },
+    "en": {
+        "title": "Exam review sheet",
+        "student_summary": "Student summary",
+        "review_questions": "Incorrect or partially correct questions",
+        "no_review_questions": "No incorrect or partially correct questions were found.",
+        "question": "Question",
+        "student_answer": "Student answer",
+        "question_text": "Question text",
+        "correct_answer": "Correct answer",
+        "correct_answer_unavailable": "Not available in the file",
+        "correction_comment": "Correction comment",
+    },
+}
+
+REVIEW_SCORE_LABELS = {
+    "it": {
+        "Progetto / assignment": "Progetto / assignment",
+        "Esame scritto": "Esame scritto",
+        "Finale": "Finale",
+    },
+    "en": {
+        "Progetto / assignment": "Project / assignment",
+        "Esame scritto": "Written exam",
+        "Finale": "Final grade",
+    },
+}
+
+REVIEW_STATUS_LABELS = {
+    "it": {
+        "Corretta": "Corretta",
+        "Errata": "Errata",
+        "Parziale": "Parziale",
+        "Da correggere": "Da correggere",
+        "Da verificare": "Da verificare",
+    },
+    "en": {
+        "Corretta": "Correct",
+        "Errata": "Incorrect",
+        "Parziale": "Partially correct",
+        "Da correggere": "To be graded",
+        "Da verificare": "To be checked",
+    },
+}
+
+
+def normalize_review_language(language: str | None) -> str:
+    if language in REVIEW_TEXTS:
+        return str(language)
+    return REVIEW_LANGUAGE_OPTIONS.get(str(language), "it")
+
+
+def review_text(language: str, key: str) -> str:
+    normalized_language = normalize_review_language(language)
+    return REVIEW_TEXTS[normalized_language].get(key, REVIEW_TEXTS["it"][key])
+
+
+def review_score_label(label: str, language: str) -> str:
+    normalized_language = normalize_review_language(language)
+    return REVIEW_SCORE_LABELS[normalized_language].get(label, label)
+
+
+def review_status_label(status: object, language: str) -> str:
+    status_text = plain_text(status)
+    normalized_language = normalize_review_language(language)
+    return REVIEW_STATUS_LABELS[normalized_language].get(status_text, status_text)
+
+
 def distribution_chart(dist_counts: pd.DataFrame, x_title: str):
     dist_labels = dist_counts[dist_counts["studenti"] > 0].copy()
     bars = (
@@ -603,7 +688,9 @@ def build_review_docx(
     include_question_text: bool,
     include_correct_answer: bool,
     review_score_columns: list[tuple[str, str]] | None = None,
+    review_language: str = "it",
 ) -> bytes:
+    review_language = normalize_review_language(review_language)
     review_questions = student_questions[student_questions["status"].isin(["Errata", "Parziale"])].sort_values("question_num")
     if not review_score_columns:
         review_score_columns = [
@@ -611,35 +698,38 @@ def build_review_docx(
             ("Esame scritto", "totale_esame"),
             ("Finale", "finale_rounded"),
         ]
-    score_headers = [label for label, _ in review_score_columns] or ["Voto"]
+    score_headers = [review_score_label(label, review_language) for label, _ in review_score_columns] or ["Grade"]
     score_row = [fmt_num(selected_total.get(column)) for _, column in review_score_columns] or ["-"]
-    title = f"Scheda visione compiti - {plain_text(selected_total.get('full_name'))}"
+    title = f"{review_text(review_language, 'title')} - {plain_text(selected_total.get('full_name'))}"
     body: list[str] = [
         paragraph_xml(title, "Title"),
-        paragraph_xml("Riepilogo studente", "Heading1"),
+        paragraph_xml(review_text(review_language, "student_summary"), "Heading1"),
         document_table_xml([score_headers, score_row]),
-        paragraph_xml("Domande errate o parzialmente corrette", "Heading1"),
+        paragraph_xml(review_text(review_language, "review_questions"), "Heading1"),
     ]
 
     if review_questions.empty:
-        body.append(paragraph_xml("Non risultano domande errate o parzialmente corrette."))
+        body.append(paragraph_xml(review_text(review_language, "no_review_questions")))
     else:
         for _, row in review_questions.iterrows():
             heading = (
-                f"Domanda {int(row['question_num'])}"
+                f"{review_text(review_language, 'question')} {int(row['question_num'])}"
                 f" - ID {plain_text(row.get('question_id')) or '-'}"
-                f" - {plain_text(row.get('status'))}"
+                f" - {review_status_label(row.get('status'), review_language)}"
                 f" ({fmt_num(row.get('integrated_score'))}/{fmt_num(row.get('possible_points'))})"
             )
             body.append(paragraph_xml(heading, "Heading2"))
-            body.append(bullet_xml(f"Risposta dello studente: {plain_text(row.get('answer')) or '-'}"))
+            body.append(bullet_xml(f"{review_text(review_language, 'student_answer')}: {plain_text(row.get('answer')) or '-'}"))
             if include_question_text:
-                body.append(bullet_xml(f"Testo domanda: {plain_text(row.get('question_text')) or '-'}"))
+                body.append(bullet_xml(f"{review_text(review_language, 'question_text')}: {plain_text(row.get('question_text')) or '-'}"))
             if include_correct_answer:
-                correct_answer = plain_text(row.get("correct_answer")) or "Non disponibile nel file"
-                body.append(bullet_xml(f"Risposta corretta: {correct_answer}"))
+                correct_answer = plain_text(row.get("correct_answer")) or review_text(
+                    review_language,
+                    "correct_answer_unavailable",
+                )
+                body.append(bullet_xml(f"{review_text(review_language, 'correct_answer')}: {correct_answer}"))
             if int(row["question_num"]) in {27, 28, 29} and plain_text(row.get("comment")):
-                body.append(bullet_xml(f"Commento correzione: {plain_text(row.get('comment'))}"))
+                body.append(bullet_xml(f"{review_text(review_language, 'correction_comment')}: {plain_text(row.get('comment'))}"))
 
     document_xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -718,6 +808,7 @@ def build_review_zip(
     include_question_text: bool,
     include_correct_answer: bool,
     review_score_columns: list[tuple[str, str]] | None = None,
+    review_language: str = "it",
 ) -> bytes:
     buffer = BytesIO()
     used_names: set[str] = set()
@@ -738,6 +829,7 @@ def build_review_zip(
                     include_question_text=include_question_text,
                     include_correct_answer=include_correct_answer,
                     review_score_columns=review_score_columns,
+                    review_language=review_language,
                 ),
             )
     return buffer.getvalue()
@@ -776,6 +868,7 @@ def build_combined_review_docx(
     include_question_text: bool,
     include_correct_answer: bool,
     review_score_columns: list[tuple[str, str]] | None = None,
+    review_language: str = "it",
 ) -> bytes:
     fragments: list[str] = []
     template_docx: bytes | None = None
@@ -788,6 +881,7 @@ def build_combined_review_docx(
             include_question_text=include_question_text,
             include_correct_answer=include_correct_answer,
             review_score_columns=review_score_columns,
+            review_language=review_language,
         )
         if template_docx is None:
             template_docx = student_docx
@@ -801,6 +895,7 @@ def build_combined_review_docx(
             include_question_text,
             include_correct_answer,
             review_score_columns=review_score_columns,
+            review_language=review_language,
         )
     return replace_docx_body(template_docx, "".join(fragments))
 
@@ -1126,10 +1221,16 @@ with tab_dashboard:
             )
 
         st.markdown("### Schede visione compiti")
-        bulk_cols = st.columns([1, 1, 2])
+        bulk_cols = st.columns([1, 1, 1, 2])
         bulk_include_question_text = bulk_cols[0].checkbox("Includi testo domanda", value=False, key="bulk_question_text")
         bulk_include_correct_answer = bulk_cols[1].checkbox("Includi risposta corretta", value=False, key="bulk_correct_answer")
-        selection_mode = bulk_cols[2].radio(
+        bulk_review_language_label = bulk_cols[2].selectbox(
+            "Lingua scheda",
+            list(REVIEW_LANGUAGE_OPTIONS),
+            key="bulk_review_language",
+        )
+        bulk_review_language = REVIEW_LANGUAGE_OPTIONS[bulk_review_language_label]
+        selection_mode = bulk_cols[3].radio(
             "Studenti da includere",
             ["Tutti nel filtro classe", "Solo iscritti alla visione"],
             horizontal=True,
@@ -1195,6 +1296,7 @@ with tab_dashboard:
                     include_question_text=bulk_include_question_text,
                     include_correct_answer=bulk_include_correct_answer,
                     review_score_columns=review_score_columns,
+                    review_language=bulk_review_language,
                 )
                 st.download_button(
                     "Scarica unico Word schede visione compiti",
@@ -1210,6 +1312,7 @@ with tab_dashboard:
                     include_question_text=bulk_include_question_text,
                     include_correct_answer=bulk_include_correct_answer,
                     review_score_columns=review_score_columns,
+                    review_language=bulk_review_language,
                 )
                 st.download_button(
                     "Scarica ZIP schede visione compiti",
@@ -1308,17 +1411,24 @@ with tab_students:
             metric_col.metric(label, value)
 
         st.markdown("#### Scheda visione compiti")
-        option_cols = st.columns([1, 1, 2])
+        option_cols = st.columns([1, 1, 1, 2])
         include_question_text = option_cols[0].checkbox("Includi testo domanda", value=False)
         include_correct_answer = option_cols[1].checkbox("Includi risposta corretta", value=False)
+        review_language_label = option_cols[2].selectbox(
+            "Lingua scheda",
+            list(REVIEW_LANGUAGE_OPTIONS),
+            key="student_review_language",
+        )
+        review_language = REVIEW_LANGUAGE_OPTIONS[review_language_label]
         review_docx = build_review_docx(
             selected_total,
             student_questions,
             include_question_text=include_question_text,
             include_correct_answer=include_correct_answer,
             review_score_columns=review_score_columns,
+            review_language=review_language,
         )
-        option_cols[2].download_button(
+        option_cols[3].download_button(
             "Scarica scheda visione compiti",
             data=review_docx,
             file_name=f"scheda_visione_compiti_{safe_filename(selected_total.get('full_name'))}.docx",

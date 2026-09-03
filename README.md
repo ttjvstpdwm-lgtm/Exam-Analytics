@@ -34,7 +34,7 @@ http://localhost:8501
 - dettaglio del singolo studente;
 - evidenziazione di domande errate, parziali o senza voto;
 - gestione dei `Manual Score`;
-- generazione schede visione compiti in Word;
+- generazione schede visione compiti in Word, in italiano o in inglese;
 - esportazione Excel corretta;
 - compilazione del file ufficiale esiti `.xls` con mappatura configurabile delle colonne voto.
 
